@@ -22,7 +22,8 @@ class APILLMServing_request(LLMServingABC):
                  model_name: str = "gpt-4o",
                  max_workers: int = 10,
                  max_retries: int = 5,
-                 temperature = 0.0
+                 temperature = 0.0,
+                 embedding_api_url: str = None  # 新增：专门用于 embedding 的端点
                  ):
         # Get API key from environment variable or config
         self.api_url = api_url
@@ -31,6 +32,21 @@ class APILLMServing_request(LLMServingABC):
         self.max_retries = max_retries
         self.temperature = temperature
         self.logger = get_logger()
+        
+        # 如果没有指定 embedding_api_url，则从 api_url 推断
+        if embedding_api_url is None:
+            # 尝试从 chat/completions 转换为 embeddings
+            if "chat/completions" in api_url:
+                self.embedding_api_url = api_url.replace("chat/completions", "embeddings")
+            else:
+                # 如果 URL 不包含 chat/completions，假设它是基础 URL
+                base_url = api_url.rstrip('/')
+                if base_url.endswith('/v1'):
+                    self.embedding_api_url = f"{base_url}/embeddings"
+                else:
+                    self.embedding_api_url = f"{base_url}/v1/embeddings"
+        else:
+            self.embedding_api_url = embedding_api_url
 
         # config api_key in os.environ global, since safty issue.
         self.api_key = os.environ.get(key_name_of_api_key)
@@ -38,6 +54,9 @@ class APILLMServing_request(LLMServingABC):
             error_msg = f"Lack of `{key_name_of_api_key}` in environment variables. Please set `{key_name_of_api_key}` as your api-key to {api_url} before using APILLMServing_request."
             self.logger.error(error_msg)
             raise ValueError(error_msg)
+        
+        self.logger.info(f"Initialized APILLMServing_request with chat URL: {self.api_url}")
+        self.logger.info(f"Initialized APILLMServing_request with embedding URL: {self.embedding_api_url}")
   
     def format_response(self, response: dict, is_embedding: bool = False) -> str:
         """Format API response, supporting both embedding and chat completion modes"""
@@ -94,6 +113,9 @@ class APILLMServing_request(LLMServingABC):
 
     def _api_chat_with_id(self, id, payload, model, is_embedding: bool = False, json_schema: dict = None):
             try:
+                # 根据请求类型选择正确的 URL
+                target_url = self.embedding_api_url if is_embedding else self.api_url
+                
                 if is_embedding:
                     payload = json.dumps({
                         "model": model,
@@ -102,12 +124,14 @@ class APILLMServing_request(LLMServingABC):
                 elif json_schema is None:
                     payload = json.dumps({
                         "model": model,
-                        "messages": payload
+                        "messages": payload,
+                        "temperature": self.temperature
                     })
                 else:
                     payload = json.dumps({
                         "model": model,
                         "messages": payload,
+                        "temperature": self.temperature,
                         "response_format": {
                             "type": "json_schema",
                             "json_schema": {
@@ -124,7 +148,7 @@ class APILLMServing_request(LLMServingABC):
                     'User-Agent': 'Apifox/1.0.0 (https://apifox.com)'
                 }
                 # Make a POST request to the API
-                response = requests.post(self.api_url, headers=headers, data=payload, timeout=1800)
+                response = requests.post(target_url, headers=headers, data=payload, timeout=1800)
                 if response.status_code == 200:
                     # logging.info(f"API request successful")
                     response_data = response.json()
@@ -132,9 +156,12 @@ class APILLMServing_request(LLMServingABC):
                     return id,self.format_response(response_data, is_embedding)
                 else:
                     logging.error(f"API request failed with status {response.status_code}: {response.text}")
+                    logging.error(f"Request URL: {target_url}")
+                    logging.error(f"Request model: {model}")
                     return id, None
             except Exception as e:
                 logging.error(f"API request error: {e}")
+                logging.error(f"Request URL: {target_url}")
                 return id, None
         
     def _api_chat_id_retry(self, id, payload, model, is_embedding : bool = False, json_schema: dict = None):
